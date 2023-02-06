@@ -1,0 +1,312 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "sentinelWorkspaceResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "This is the Azure Resource Id for the Azure Key Vault which the credentials will be stored. If this parameter is left blank, then a new Key Vault will be provisioned in this Resource Group"
+      }
+    },
+
+    "functionAppNamePrefix": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 11,
+      "defaultValue": "CTI",
+      "metadata": {
+        "description": "The name of the Azure Function app."
+      }
+    },
+
+    "servicePrincipalClientId": {
+      "type": "string",
+      "metadata": {
+        "description": "This is client id of an Azure AD app registration with permissions to write tiindicators to the Microsoft Graph"
+      }
+    },
+
+    "servicePrincipalTenantId": {
+      "type": "string",
+      "metadata": {
+        "description": "This is Tenant id of an Azure AD app registration with permissions to write tiindicators to the Microsoft Graph"
+      }
+    },
+
+    "servicePrincipalSecret": {
+      "type": "securestring",
+      "metadata": {
+        "description": "This is secret of an Azure AD app registration with permissions to write tiindicators to the Microsoft Graph"
+      }
+    },
+
+    "MISPUrl": {
+      "type": "string",
+      "defaultValue": "https://misp.contoso.com",
+      "metadata": {
+        "description": "This is baseURL from MISP to read events and attributes"
+      }
+    },
+
+    "MISPApiKey": {
+      "type": "securestring",
+      "metadata": {
+        "description": "This is secret from MISP to read events and attributes"
+      }
+    }
+  },
+  "variables": {
+    "packageUri": "https://github.com/TheAlistairRoss/PythonFunctionDeploy/blob/main/.build/PythonFunctionDeploy.zip?raw=true",
+    "functionAppUniqueString": "[uniqueString(parameters('functionAppNamePrefix'), resourceGroup().name, subscription().subscriptionId)]",
+
+    "appServicePlanName": "[toLower(format('{0}{1}', parameters('functionAppNamePrefix'), variables('functionAppUniqueString')))]",
+    "applicationInsightsName": "[toLower(format('{0}{1}', parameters('functionAppNamePrefix'), variables('functionAppUniqueString')))]",
+    "functionAppName": "[toLower(format('{0}{1}', parameters('functionAppNamePrefix'), variables('functionAppUniqueString')))]",
+    "storageAccountName": "[toLower(format('{0}{1}',take(parameters('functionAppNamePrefix'),11),variables('functionAppUniqueString')))]",
+    "storageAccountContainerName": "[toLower(format('{0}/default/{1}-tmp', variables('storageAccountName'), variables('functionAppName')))]",
+    "keyVaultName": "[format('{0}{1}',take(parameters('functionAppNamePrefix'),11),variables('functionAppUniqueString'))]",
+
+    "MISPKeyName": "[format('{0}-MISPKey-{1}',parameters('functionAppNamePrefix'),variables('functionAppUniqueString'))]",
+    "servicePrincipalSecretName": "[format('{0}-AppRegKey-{1}',parameters('functionAppNamePrefix'),variables('functionAppUniqueString'))]"
+
+  },
+
+  "resources": [
+    // Storage Account - Done
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2021-06-01",
+      "name": "[variables('storageAccountName')]",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "name": "Standard_LRS",
+        "tier": "Standard"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "accessTier": "Hot",
+        "networkAcls": {
+          "bypass": "AzureServices",
+          "virtualNetworkRules": [],
+          "ipRules": [],
+          "defaultAction": "Allow"
+        },
+        "supportsHttpsTrafficOnly": true,
+        "encryption": {
+          "services": {
+            "file": {
+              "keyType": "Account",
+              "enabled": true
+            },
+            "blob": {
+              "keyType": "Account",
+              "enabled": true
+            }
+          },
+          "keySource": "Microsoft.Storage"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/blobServices/containers",
+      "apiVersion": "2021-06-01",
+      "name": "[variables('storageAccountContainerName')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ],
+      "sku": {
+        "name": "Standard_LRS",
+        "tier": "Standard"
+      },
+      "properties": {
+        "cors": {
+          "corsRules": []
+        },
+        "deleteRetentionPolicy": {
+          "enabled": false
+        }
+      }
+    },
+
+    // App Service Plan
+    {
+      "type": "Microsoft.Web/serverfarms",
+      "apiVersion": "2021-02-01",
+      "name": "[variables('appServicePlanName')]",
+      "location": "[resourceGroup().location]",
+      "sku": {
+        "Tier": "ElasticPremium",
+        "Name": "EP1"
+      },
+      "kind": "functionapp,linux",
+      "properties": {
+        "name": "[variables('appServicePlanName')]",
+        "workerSize": "2",
+        "workerSizeId": "2",
+        "numberOfWorkers": "1",
+        "reserved": true,
+        "zoneRedundant": false
+      }
+    },
+
+    //Application Insights 
+    {
+      "type": "microsoft.insights/components",
+      "apiVersion": "2020-02-02",
+      "name": "[variables('applicationInsightsName')]",
+      "location": "[resourceGroup().location]",
+      "tags": {
+        "[concat('hidden-link:', resourceId('Microsoft.Web/sites', parameters('functionAppNamePrefix')))]": "Resource"
+      },
+      "properties": {
+        "Application_Type": "web",
+        "Flow_Type": "Bluefield",
+        "WorkspaceResourceId": "[parameters('sentinelWorkspaceResourceId')]"
+      },
+      "kind": "web"
+    },
+
+    // Function App
+    {
+      "type": "Microsoft.Web/sites",
+      "apiVersion": "2018-11-01",
+      "name": "[variables('functionAppName')]",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[resourceId('microsoft.insights/components', variables('applicationInsightsName'))]",
+        "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]",
+        "[resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName'))]"
+      ],
+      "kind": "functionapp,linux",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "name": "[variables('functionAppName')]",
+        "httpsOnly": true,
+        "clientAffinityEnabled": true,
+        "alwaysOn": true,
+        "reserved": true,
+        "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('appServicePlanName'))]",
+        "siteConfig": {
+          "linuxFxVersion": "Python|3.9",
+          "ftpsState": "FtpsOnly"
+        }
+      },
+      "resources": [
+        {
+          "apiVersion": "2018-11-01",
+          "type": "config",
+          "name": "appsettings",
+          "dependsOn": [
+            "[concat('Microsoft.Web/sites/', variables('functionAppName'))]",
+            "[resourceId('Microsoft.KeyVault/vaults/', variables('KeyVaultName'))]",
+            "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('KeyVaultName'), variables('servicePrincipalSecretName'))]",
+            "[resourceId('Microsoft.KeyVault/vaults/secrets', variables('KeyVaultName'), variables('MISPKeyName'))]",
+            "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', variables('storageAccountName'), 'default', concat(variables('functionAppName'),'-tmp'))]"
+          ],
+          "properties": {
+            "APPINSIGHTS_INSTRUMENTATIONKEY": "[reference(resourceId('Microsoft.Insights/components', variables('applicationInsightsName'))).InstrumentationKey]",
+            "APPLICATIONINSIGHTS_CONNECTION_STRING": "[reference(resourceId('Microsoft.Insights/components', variables('applicationInsightsName'))).ConnectionString]",
+            "AzureWebJobsStorage": "[format('DefaultEndpointsProtocol=https;AccountName={0};EndpointSuffix={1};AccountKey={2}', variables('storageAccountName'), environment().suffixes.storage, listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')),'2022-05-01').keys[0].value)]",
+            "client_id": "[parameters('servicePrincipalClientId')]",
+            "client_secret": "[format('@Microsoft.KeyVault(SecretUri=''{0}/secrets/{1}',reference(resourceId('Microsoft.KeyVault/vaults',variables('keyVaultName')),'2021-10-01').vaultUri, variables('servicePrincipalSecretName'))]",
+            "container_name": "[variables('storageAccountContainerName')]",
+            "FUNCTIONS_EXTENSION_VERSION": "~4",
+            "FUNCTIONS_WORKER_RUNTIME": "python",
+            "misp_key": "[format('@Microsoft.KeyVault(SecretUri=''{0}/secrets/{1}',reference(resourceId('Microsoft.KeyVault/vaults',variables('keyVaultName')),'2021-10-01').vaultUri, variables('MISPKeyName'))]",
+            "misp_url": "[parameters('MISPUrl')]",
+            "tenant_id": "[parameters('servicePrincipalTenantId')]",
+            "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING": "[format('DefaultEndpointsProtocol=https;AccountName={0};EndpointSuffix={1};AccountKey={2}', variables('storageAccountName'), environment().suffixes.storage, listKeys(resourceId('Microsoft.Storage/storageAccounts', variables('storageAccountName')),'2022-05-01').keys[0].value)]",
+            "WEBSITE_CONTENTSHARE": "[variables('functionAppName')]",
+            //"WEBSITE_RUN_FROM_PACKAGE": 1
+            "SCM_DO_BUILD_DURING_DEPLOYMENT": true,
+            "ENABLE_ORYX_BUILD": true
+          }
+        },
+        {
+          "type": "extensions",
+          "name": "ZipDeploy",
+          "apiVersion": "2018-11-01",
+          "dependsOn": [
+            "[resourceId('Microsoft.Web/sites/', variables('functionAppName'))]",
+            "[resourceId('Microsoft.Web/sites/config', variables('functionAppName'), 'appsettings')]"
+          ],
+          "properties": {
+            "packageUri": "[variables('packageUri')]"
+          }
+        }
+      ]
+    },
+
+    // Key Vault
+    {
+      "type": "Microsoft.KeyVault/vaults",
+      "apiVersion": "2021-10-01",
+      "name": "[variables('keyVaultName')]",
+      "location": "[resourceGroup().location]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/sites', variables('functionAppName'))]"
+      ],
+      "properties": {
+        "tenantId": "[tenant().tenantId]",
+        "sku": {
+          "family": "A",
+          "name": "Standard"
+        },
+        "networkAcls": {
+          "bypass": "AzureServices",
+          "defaultAction": "Allow",
+          "ipRules": [],
+          "virtualNetworkRules": []
+        },
+        "accessPolicies": [
+          {
+            "tenantId": "[reference(resourceId('Microsoft.Web/sites', variables('functionAppName')), '2022-03-01', 'Full').identity.tenantId]",
+            "objectId": "[reference(resourceId('Microsoft.Web/sites', variables('functionAppName')), '2022-03-01', 'Full').identity.principalId]",
+            "permissions": {
+              "secrets": [
+                "Get"
+              ]
+            }
+          }
+        ]
+      },
+      "resources": [
+        {
+          "type": "secrets",
+          "apiVersion": "2021-10-01",
+          "name": "[variables('MISPKeyName')]",
+          "location": "[resourceGroup().location]",
+          "dependsOn": [
+            "[resourceId('Microsoft.KeyVault/vaults',variables('keyVaultName'))]"
+          ],
+          "properties": {
+            "attributes": {
+              "enabled": true
+            },
+            "contentType": "string",
+            "value": "[parameters('MISPApiKey')]"
+          }
+        },
+        {
+          "type": "secrets",
+          "apiVersion": "2021-10-01",
+          "name": "[variables('servicePrincipalSecretName')]",
+          "location": "[resourceGroup().location]",
+          "dependsOn": [
+            "[resourceId('Microsoft.KeyVault/vaults',variables('keyVaultName'))]"
+          ],
+          "properties": {
+            "attributes": {
+              "enabled": true
+            },
+            "contentType": "string",
+            "value": "[parameters('servicePrincipalSecret')]"
+          }
+        }
+
+      ]
+    }
+  ]
+}

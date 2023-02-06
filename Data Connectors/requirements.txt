@@ -1,0 +1,6 @@
+# DO NOT include azure-functions-worker in this file
+
+
+azure-functions==1.11.2
+numpy
+logging
